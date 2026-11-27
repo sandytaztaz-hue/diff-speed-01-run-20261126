@@ -10,7 +10,13 @@ import { dirname, join } from "node:path";
 
 const dir = dirname(fileURLToPath(import.meta.url));
 const bytes = readFileSync(join(dir, "diff.wasm"));
-const inst = new WebAssembly.Instance(new WebAssembly.Module(bytes), {});
+const inst = new WebAssembly.Instance(new WebAssembly.Module(bytes), {
+  env: {
+    abort() {
+      throw new Error("wasm abort");
+    },
+  },
+});
 const ex = inst.exports;
 const dec = new TextDecoder();
 

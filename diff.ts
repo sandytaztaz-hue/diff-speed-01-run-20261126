@@ -542,7 +542,7 @@ function diffLines(aCount: i32, bCount: i32): i32 {
         let x: i32;
         if (d == 0) {
           x = 0;
-        } else if (k == -d || (k != d && vAt(d - 1, k - 1) < vAt(d - 1, k + 1))) {
+        } else if (k == -d || (k != d && vAt(d - 1, k - 1) + 1 < vAt(d - 1, k + 1))) {
           x = vAt(d - 1, k + 1);
         } else {
           x = vAt(d - 1, k - 1) + 1;
@@ -562,26 +562,30 @@ function diffLines(aCount: i32, bCount: i32): i32 {
     }
   }
   // Backtrack from (N, M) at level D, writing ops in reverse into rev[].
+  // The snake at each level is undone exactly to its recorded start point
+  // (xPre from the predecessor V value) — NOT by line equality, which would
+  // over-consume past a duplicated line and keep the wrong occurrence.
   let r: i32 = 0;
   let d = D;
   let k = N - M;
   let x = N;
   let y = M;
   while (d > 0) {
-    while (x > 0 && y > 0 && load<i32>(aBase + (pre + x - 1) * 4) == load<i32>(bBase + (pre + y - 1) * 4)) {
-      store<u8>(rev + r, 0);
-      r++;
-      x--;
-      y--;
-    }
     let prevK: i32;
     let isIns: bool;
-    if (k == -d || (k != d && vAt(d - 1, k - 1) < vAt(d - 1, k + 1))) {
+    if (k == -d || (k != d && vAt(d - 1, k - 1) + 1 < vAt(d - 1, k + 1))) {
       prevK = k + 1;
       isIns = true;
     } else {
       prevK = k - 1;
       isIns = false;
+    }
+    const xPre = isIns ? vAt(d - 1, k + 1) : vAt(d - 1, k - 1) + 1;
+    while (x > xPre) {
+      store<u8>(rev + r, 0);
+      r++;
+      x--;
+      y--;
     }
     if (isIns) {
       store<u8>(rev + r, 2);
@@ -595,7 +599,7 @@ function diffLines(aCount: i32, bCount: i32): i32 {
     d--;
     k = prevK;
   }
-  while (x > 0 && y > 0 && load<i32>(aBase + (pre + x - 1) * 4) == load<i32>(bBase + (pre + y - 1) * 4)) {
+  while (x > 0) {
     store<u8>(rev + r, 0);
     r++;
     x--;
@@ -624,6 +628,12 @@ function diffLines(aCount: i32, bCount: i32): i32 {
 // control characters; plain bytes pass through unchanged.
 let outBase: i32 = 0;
 let outPos: i32 = 0;
+
+// Write a byte with no escaping (JSON structure: [ ] " ,).
+function oRaw(b: i32): void {
+  store<u8>(outBase + outPos, b);
+  outPos++;
+}
 
 function oByte(b: i32): void {
   const p = outBase + outPos;
@@ -858,7 +868,6 @@ function renderPatch(aCount: i32, bCount: i32, opCount: i32): void {
       const op = load<u8>(fwd + oi);
       if (op == 0) {
         oByte(61);
-        oByte(32);
         const s = load<i32>(wp + A_START + ai * 4);
         const l = load<i32>(wp + A_LEN + ai * 4);
         const endsNl = oLine(s, l);
@@ -869,9 +878,15 @@ function renderPatch(aCount: i32, bCount: i32, opCount: i32): void {
           oByte(37);
           oByte(10);
         }
-      } else if (op == 1) {
+        oi++;
+        continue;
+      }
+      // Change run: emit its deletions first, then its insertions.
+      let re = oi;
+      while (re < hEnd && load<u8>(fwd + re) != 0) re++;
+      for (let j = oi; j < re; j++) {
+        if (load<u8>(fwd + j) != 1) continue;
         oByte(45);
-        oByte(32);
         const s = load<i32>(wp + A_START + ai * 4);
         const l = load<i32>(wp + A_LEN + ai * 4);
         const endsNl = oLine(s, l);
@@ -881,9 +896,10 @@ function renderPatch(aCount: i32, bCount: i32, opCount: i32): void {
           oByte(37);
           oByte(10);
         }
-      } else {
+      }
+      for (let j = oi; j < re; j++) {
+        if (load<u8>(fwd + j) != 2) continue;
         oByte(43);
-        oByte(32);
         const s = load<i32>(wp + B_START + bi * 4);
         const l = load<i32>(wp + B_LEN + bi * 4);
         const endsNl = oLine(s, l);
@@ -894,7 +910,7 @@ function renderPatch(aCount: i32, bCount: i32, opCount: i32): void {
           oByte(10);
         }
       }
-      oi++;
+      oi = re;
     }
   }
 }
@@ -928,7 +944,7 @@ function diffOneCase(oldStart: i32, oldEnd: i32, newStart: i32, newEnd: i32): vo
 export function runCases(inp: i32, len: i32, outp: i32): i32 {
   outBase = outp;
   outPos = 0;
-  oByte(91);
+  oRaw(91);
   let pos: i32 = 0;
   let first = true;
   while (true) {
@@ -942,14 +958,14 @@ export function runCases(inp: i32, len: i32, outp: i32): i32 {
     const newStart = nm + 7;
     const newEnd = findStringEnd(newStart, len);
     if (newEnd < 0) break;
-    if (!first) oByte(44);
+    if (!first) oRaw(44);
     first = false;
-    oByte(34);
+    oRaw(34);
     diffOneCase(oldStart, oldEnd, newStart, newEnd);
-    oByte(34);
+    oRaw(34);
     pos = newEnd + 1;
   }
-  oByte(93);
+  oRaw(93);
   return outPos;
 }
 
