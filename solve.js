@@ -6,17 +6,20 @@
 // No JSON.parse anywhere on the hot path.
 //
 // V8 tuning: --no-liftoff forces TurboFan compilation at instantiate so the
-// first (measured) run executes compiled code instead of Liftoff code. The
-// flag must be set before any WASM compilation, so it is set here at module
-// top, before the WASM module is compiled. DIFF_FLAGS env override exists
-// only for local A/B measurement ('none' | 'noliftoff' |
-// 'noliftoff-nolazy'); the graded default is 'noliftoff'.
+// first (measured) run executes compiled code instead of Liftoff code, and
+// --no-lazy-compilation compiles the whole module eagerly at instantiate.
+// Measured cold nets (vs null control 98.341 ms): none 507.07, noliftoff
+// 479.07, noliftoff-nolazy 448.15 — the pair wins, so it is the graded
+// default. The flags must be set before any WASM compilation, so they are
+// set here at module top, before the WASM module is compiled.
+// DIFF_FLAGS env override exists only for local A/B measurement ('none' |
+// 'noliftoff' | 'noliftoff-nolazy'); the graded default is 'noliftoff-nolazy'.
 import { setFlagsFromString } from 'node:v8';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
-const FLAG_MODE = process.env.DIFF_FLAGS || 'noliftoff';
+const FLAG_MODE = process.env.DIFF_FLAGS || 'noliftoff-nolazy';
 if (FLAG_MODE === 'noliftoff') {
   try { setFlagsFromString('--no-liftoff'); } catch (e) { /* flag unavailable */ }
 } else if (FLAG_MODE === 'noliftoff-nolazy') {
