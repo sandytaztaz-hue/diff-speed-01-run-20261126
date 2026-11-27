@@ -17,6 +17,11 @@ export function run(input) {
   const cases = JSON.stringify([{ id: "c0", input }]);
   const bytes = new TextEncoder().encode(cases);
   const inBase = ex.input_base();
+  const needBytes = inBase + bytes.length;
+  if (needBytes > mem.buffer.byteLength) {
+    const pages = Math.ceil((needBytes - mem.buffer.byteLength) / 65536);
+    mem.grow(pages);
+  }
   new Uint8Array(mem.buffer).set(bytes, inBase);
   const outLen = ex.solve_all(inBase, bytes.length);
   const out = new TextDecoder().decode(

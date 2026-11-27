@@ -13,6 +13,12 @@ const outBase = inst.exports.out_base as () => number;
 const inputBase = inst.exports.input_base as () => number;
 
 const inBase = inputBase();
+// Grow the (lazily small) memory to fit the input before copying.
+const needBytes = inBase + input.length;
+if (needBytes > mem.buffer.byteLength) {
+  const pages = Math.ceil((needBytes - mem.buffer.byteLength) / 65536);
+  mem.grow(pages);
+}
 new Uint8Array(mem.buffer).set(input, inBase);
 const outLen = solveAll(inBase, input.length);
 const out = new Uint8Array(mem.buffer, outBase(), outLen);
