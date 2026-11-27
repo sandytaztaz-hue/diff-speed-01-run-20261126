@@ -16,8 +16,9 @@ export function run(input) {
   const mem = ex.memory;
   const cases = JSON.stringify([{ id: "c0", input }]);
   const bytes = new TextEncoder().encode(cases);
-  new Uint8Array(mem.buffer).set(bytes, 0);
-  const outLen = ex.solve_all(0, bytes.length);
+  const inBase = ex.input_base();
+  new Uint8Array(mem.buffer).set(bytes, inBase);
+  const outLen = ex.solve_all(inBase, bytes.length);
   const out = new TextDecoder().decode(
     new Uint8Array(mem.buffer, ex.out_base(), outLen),
   );
