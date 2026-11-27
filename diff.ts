@@ -5,8 +5,8 @@
 
 // Scratch buffers, allocated once at instantiation. Sizes cover the kit's
 // regime (8.5 MB input, ~2 MB answers, D ~ 4000 -> V rows need (D+1)^2 i32).
-const IN_CAP: i32 = 16 << 20;
-const OUT_CAP: i32 = 8 << 20;
+const IN_CAP: i32 = 64 << 20;
+const OUT_CAP: i32 = 32 << 20;
 const WORK_CAP: i32 = 256 << 20;
 
 const inBuf = new Uint8Array(IN_CAP);
@@ -45,44 +45,64 @@ function eqMask(p: i32, b: i32): i32 {
   return i8x16.bitmask(i8x16.eq(v, t));
 }
 
-// Find the marker `"input":{"old":"` (16 bytes) at or after `from` in the
-// input buffer (length `len`). Returns the index of its opening quote, or -1.
-// Prefilter: only chunks containing a `"` can hold the marker.
-function findOldMark(from: i32, len: i32): i32 {
+// ---- whitespace-tolerant structural markers --------------------------------
+// The cases file is minified JSON from the generator, but the scanner tolerates
+// whitespace between tokens so a pretty-printed file still works. Each finder
+// locates a key, then parses `ws* : ws* "` (and `{` for "input") and returns
+// the string content's first byte, or -1.
+function skipWs(p: i32, len: i32): i32 {
+  const base = inPtr();
+  while (p < len) {
+    const c = ld8(base + p);
+    if (c == 32 || c == 9 || c == 13 || c == 10) p++;
+    else break;
+  }
+  return p;
+}
+
+// Find `"input" ws* : ws* { ws* "old" ws* : ws* "` at or after `from`.
+// Returns the old string's content start, or -1.
+function findInputOld(from: i32, len: i32): i32 {
   const base = inPtr();
   let p = from;
-  const end = len - 16;
+  const end = len - 7;
   while (p <= end) {
-    const m = eqMask(base + p, 34); // '"'
+    const m = eqMask(base + p, 34);
     if (m == 0) {
       p += 16;
       continue;
     }
-    // Check each quote position in this chunk for the full marker.
     let mm = m;
     while (mm != 0) {
-      const bit = ctz<i32>(mm);
-      const q = p + bit;
-      if (q <= end && ld8(base + q) == 34 && ld8(base + q + 1) == 105 && ld8(base + q + 2) == 110 && ld8(base + q + 3) == 112 && ld8(base + q + 4) == 117 && ld8(base + q + 5) == 116 && ld8(base + q + 6) == 34 && ld8(base + q + 7) == 58 && ld8(base + q + 8) == 123 && ld8(base + q + 9) == 34 && ld8(base + q + 10) == 111 && ld8(base + q + 11) == 108 && ld8(base + q + 12) == 100 && ld8(base + q + 13) == 34 && ld8(base + q + 14) == 58 && ld8(base + q + 15) == 34) {
-        return q;
+      const q = p + ctz<i32>(mm);
+      if (q <= end && ld8(base + q + 1) == 105 && ld8(base + q + 2) == 110 && ld8(base + q + 3) == 112 && ld8(base + q + 4) == 117 && ld8(base + q + 5) == 116 && ld8(base + q + 6) == 34) {
+        let r = skipWs(q + 7, len);
+        if (r < len && ld8(base + r) == 58) {
+          r = skipWs(r + 1, len);
+          if (r < len && ld8(base + r) == 123) {
+            r = skipWs(r + 1, len);
+            if (r + 5 < len && ld8(base + r) == 34 && ld8(base + r + 1) == 111 && ld8(base + r + 2) == 108 && ld8(base + r + 3) == 100 && ld8(base + r + 4) == 34) {
+              r = skipWs(r + 5, len);
+              if (r < len && ld8(base + r) == 58) {
+                r = skipWs(r + 1, len);
+                if (r < len && ld8(base + r) == 34) return r + 1;
+              }
+            }
+          }
+        }
       }
       mm &= mm - 1;
     }
     p += 16;
   }
-  // Tail: scalar scan for a quote, then check the marker.
-  while (p < len) {
-    if (ld8(base + p) == 34 && p <= end && ld8(base + p + 1) == 105 && ld8(base + p + 2) == 110 && ld8(base + p + 3) == 112 && ld8(base + p + 4) == 117 && ld8(base + p + 5) == 116 && ld8(base + p + 6) == 34 && ld8(base + p + 7) == 58 && ld8(base + p + 8) == 123 && ld8(base + p + 9) == 34 && ld8(base + p + 10) == 111 && ld8(base + p + 11) == 108 && ld8(base + p + 12) == 100 && ld8(base + p + 13) == 34 && ld8(base + p + 14) == 58 && ld8(base + p + 15) == 34) return p;
-    p++;
-  }
   return -1;
 }
 
-// Find the marker `"new":"` (7 bytes) at or after `from`. Returns its index, or -1.
+// Find `"new" ws* : ws* "` at or after `from`. Returns the content start, or -1.
 function findNewMark(from: i32, len: i32): i32 {
   const base = inPtr();
   let p = from;
-  const end = len - 7;
+  const end = len - 5;
   while (p <= end) {
     const m = eqMask(base + p, 34);
     if (m == 0) {
@@ -92,23 +112,26 @@ function findNewMark(from: i32, len: i32): i32 {
     let mm = m;
     while (mm != 0) {
       const q = p + ctz<i32>(mm);
-      if (q <= end && ld8(base + q + 1) == 110 && ld8(base + q + 2) == 101 && ld8(base + q + 3) == 119 && ld8(base + q + 4) == 34 && ld8(base + q + 5) == 58 && ld8(base + q + 6) == 34) return q;
+      if (q <= end && ld8(base + q + 1) == 110 && ld8(base + q + 2) == 101 && ld8(base + q + 3) == 119 && ld8(base + q + 4) == 34) {
+        let r = skipWs(q + 5, len);
+        if (r < len && ld8(base + r) == 58) {
+          r = skipWs(r + 1, len);
+          if (r < len && ld8(base + r) == 34) return r + 1;
+        }
+      }
       mm &= mm - 1;
     }
     p += 16;
-  }
-  while (p < len) {
-    if (ld8(base + p) == 34 && p <= end && ld8(base + p + 1) == 110 && ld8(base + p + 2) == 101 && ld8(base + p + 3) == 119 && ld8(base + p + 4) == 34 && ld8(base + p + 5) == 58 && ld8(base + p + 6) == 34) return p;
-    p++;
   }
   return -1;
 }
 
-// Find the marker `"old":"` (7 bytes) at or after `from`. Returns its index, or -1.
+// Find `"old" ws* : ws* "` at or after `from` (bare case object, no "input"
+// wrapper). Returns the content start, or -1.
 function findOldShortMark(from: i32, len: i32): i32 {
   const base = inPtr();
   let p = from;
-  const end = len - 7;
+  const end = len - 5;
   while (p <= end) {
     const m = eqMask(base + p, 34);
     if (m == 0) {
@@ -118,14 +141,16 @@ function findOldShortMark(from: i32, len: i32): i32 {
     let mm = m;
     while (mm != 0) {
       const q = p + ctz<i32>(mm);
-      if (q <= end && ld8(base + q + 1) == 111 && ld8(base + q + 2) == 108 && ld8(base + q + 3) == 100 && ld8(base + q + 4) == 34 && ld8(base + q + 5) == 58 && ld8(base + q + 6) == 34) return q;
+      if (q <= end && ld8(base + q + 1) == 111 && ld8(base + q + 2) == 108 && ld8(base + q + 3) == 100 && ld8(base + q + 4) == 34) {
+        let r = skipWs(q + 5, len);
+        if (r < len && ld8(base + r) == 58) {
+          r = skipWs(r + 1, len);
+          if (r < len && ld8(base + r) == 34) return r + 1;
+        }
+      }
       mm &= mm - 1;
     }
     p += 16;
-  }
-  while (p < len) {
-    if (ld8(base + p) == 34 && p <= end && ld8(base + p + 1) == 111 && ld8(base + p + 2) == 108 && ld8(base + p + 3) == 100 && ld8(base + p + 4) == 34 && ld8(base + p + 5) == 58 && ld8(base + p + 6) == 34) return p;
-    p++;
   }
   return -1;
 }
@@ -281,32 +306,118 @@ function scanLines(spanStart: i32, spanEnd: i32, which: i32): i32 {
 }
 
 // ---- line hash --------------------------------------------------------------
-// 32-bit hash over a line's RAW bytes (the generator's JSON escaping is
-// deterministic, so equal decoded lines have equal raw bytes; `\uXXXX` is
-// normalised at equality-check time, not here). Two interleaved FNV chains
-// over 4-byte words keep the multiply latency off the critical path.
+// 32-bit hash over a line's DECODED bytes (escapes resolved: `\n` -> 0x0A,
+// `\r` -> 0x0D, `\"` -> 0x22, `\\` -> 0x5C, `\uXXXX` -> its UTF-8 bytes), so
+// equal lines hash equal under any JSON encoding of the same text. Four
+// interleaved FNV chains (lane = decoded position mod 4) keep the multiply
+// latency off the critical path; 4-byte bulk steps run while the chunk holds
+// no backslash and the lanes are aligned.
 function hashSpan(start: i32, len: i32): i32 {
   const base = inPtr();
   let h0: u32 = 2166136261;
   let h1: u32 = 0x9e3779b9;
+  let h2: u32 = 0x85ebca6b;
+  let h3: u32 = 0xc2b2ae35;
   let p = start;
   const end = start + len;
-  let w: i32 = 0;
-  while (p + 4 <= end) {
-    const word = ld32(base + p);
-    if ((w & 1) == 0) h0 = (h0 ^ word) * 16777619;
-    else h1 = (h1 ^ word) * 16777619;
-    p += 4;
-    w++;
-  }
+  let np: i32 = 0; // decoded byte position in the line
+  // Feed one decoded byte into its lane.
   while (p < end) {
-    const b = ld8(base + p) as u32;
-    if ((w & 1) == 0) h0 = (h0 ^ b) * 16777619;
-    else h1 = (h1 ^ b) * 16777619;
-    p++;
+    // Bulk path: lanes aligned and the next 4 raw bytes hold no backslash.
+    if ((np & 3) == 0 && p + 4 <= end) {
+      const w = ld32(base + p);
+      // Has-byte test for 0x5C in any of the 4 bytes.
+      const x = w ^ 0x5c5c5c5c;
+      const hasBs = ((x - 0x01010101) & ~x & 0x80808080) != 0;
+      if (!hasBs) {
+        h0 = (h0 ^ (w & 255)) * 16777619;
+        h1 = (h1 ^ ((w >> 8) & 255)) * 16777619;
+        h2 = (h2 ^ ((w >> 16) & 255)) * 16777619;
+        h3 = (h3 ^ ((w >> 24) & 255)) * 16777619;
+        p += 4;
+        np += 4;
+        continue;
+      }
+    }
+    const c = ld8(base + p);
+    if (c != 92) {
+      const lane = np & 3;
+      if (lane == 0) h0 = (h0 ^ c) * 16777619;
+      else if (lane == 1) h1 = (h1 ^ c) * 16777619;
+      else if (lane == 2) h2 = (h2 ^ c) * 16777619;
+      else h3 = (h3 ^ c) * 16777619;
+      p++;
+      np++;
+      continue;
+    }
+    if (p + 1 >= end) {
+      // Trailing lone backslash (invalid JSON, cannot occur): feed it raw.
+      const lane = np & 3;
+      if (lane == 0) h0 = (h0 ^ 92) * 16777619;
+      else if (lane == 1) h1 = (h1 ^ 92) * 16777619;
+      else if (lane == 2) h2 = (h2 ^ 92) * 16777619;
+      else h3 = (h3 ^ 92) * 16777619;
+      p++;
+      np++;
+      continue;
+    }
+    const nx = ld8(base + p + 1);
+    if (nx == 117) {
+      // \uXXXX: decode to UTF-8 bytes.
+      let cp = 0;
+      for (let i = 0; i < 4; i++) cp = (cp << 4) | hexVal(ld8(base + p + 2 + i));
+      p += 6;
+      if (cp >= 0xd800 && cp <= 0xdbff && p + 5 < end && ld8(base + p) == 92 && ld8(base + p + 1) == 117) {
+        let lo = 0;
+        for (let i = 0; i < 4; i++) lo = (lo << 4) | hexVal(ld8(base + p + 2 + i));
+        if (lo >= 0xdc00 && lo <= 0xdfff) {
+          cp = 0x10000 + ((cp - 0xd800) << 10) + (lo - 0xdc00);
+          p += 6;
+        }
+      }
+      // Feed the UTF-8 bytes of cp.
+      let b0: i32 = 0, b1: i32 = 0, b2: i32 = 0, b3: i32 = 0, nb: i32 = 0;
+      if (cp < 0x80) {
+        b0 = cp; nb = 1;
+      } else if (cp < 0x800) {
+        b0 = 0xc0 | (cp >> 6); b1 = 0x80 | (cp & 63); nb = 2;
+      } else if (cp < 0x10000) {
+        b0 = 0xe0 | (cp >> 12); b1 = 0x80 | ((cp >> 6) & 63); b2 = 0x80 | (cp & 63); nb = 3;
+      } else {
+        b0 = 0xf0 | (cp >> 18); b1 = 0x80 | ((cp >> 12) & 63); b2 = 0x80 | ((cp >> 6) & 63); b3 = 0x80 | (cp & 63); nb = 4;
+      }
+      // Feed b0..b(nb-1) through the lanes in order.
+      for (let i = 0; i < nb; i++) {
+        const b = i == 0 ? b0 : i == 1 ? b1 : i == 2 ? b2 : b3;
+        const lane = np & 3;
+        if (lane == 0) h0 = (h0 ^ b) * 16777619;
+        else if (lane == 1) h1 = (h1 ^ b) * 16777619;
+        else if (lane == 2) h2 = (h2 ^ b) * 16777619;
+        else h3 = (h3 ^ b) * 16777619;
+        np++;
+      }
+      continue;
+    }
+    let db: i32;
+    if (nx == 110) db = 10;
+    else if (nx == 114) db = 13;
+    else if (nx == 116) db = 9;
+    else if (nx == 98) db = 8;
+    else if (nx == 102) db = 12;
+    else if (nx == 47) db = 47;
+    else if (nx == 34) db = 34;
+    else if (nx == 92) db = 92;
+    else db = nx;
+    const lane = np & 3;
+    if (lane == 0) h0 = (h0 ^ db) * 16777619;
+    else if (lane == 1) h1 = (h1 ^ db) * 16777619;
+    else if (lane == 2) h2 = (h2 ^ db) * 16777619;
+    else h3 = (h3 ^ db) * 16777619;
+    p += 2;
+    np++;
   }
-  let h: u32 = h0 ^ (h1 * 2654435761);
-  h ^= (len as u32) * 0x9e3779b1;
+  let h: u32 = h0 ^ (h1 * 2654435761) ^ (h2 * 0x27d4eb2f) ^ (h3 * 0x165667b1);
+  h ^= (np as u32) * 0x9e3779b1;
   h ^= h >> 13;
   h *= 0x5bd1e995;
   h ^= h >> 15;
@@ -948,14 +1059,12 @@ export function runCases(inp: i32, len: i32, outp: i32): i32 {
   let pos: i32 = 0;
   let first = true;
   while (true) {
-    const om = findOldMark(pos, len);
-    if (om < 0) break;
-    const oldStart = om + 16;
+    const oldStart = findInputOld(pos, len);
+    if (oldStart < 0) break;
     const oldEnd = findStringEnd(oldStart, len);
     if (oldEnd < 0) break;
-    const nm = findNewMark(oldEnd + 1, len);
-    if (nm < 0) break;
-    const newStart = nm + 7;
+    const newStart = findNewMark(oldEnd + 1, len);
+    if (newStart < 0) break;
     const newEnd = findStringEnd(newStart, len);
     if (newEnd < 0) break;
     if (!first) oRaw(44);
@@ -974,20 +1083,13 @@ export function runCases(inp: i32, len: i32, outp: i32): i32 {
 export function runOne(inp: i32, len: i32, outp: i32): i32 {
   outBase = outp;
   outPos = 0;
-  let oldStart: i32 = -1;
-  const om = findOldMark(0, len);
-  if (om >= 0) {
-    oldStart = om + 16;
-  } else {
-    const os = findOldShortMark(0, len);
-    if (os >= 0) oldStart = os + 7;
-  }
+  let oldStart = findInputOld(0, len);
+  if (oldStart < 0) oldStart = findOldShortMark(0, len);
   if (oldStart < 0) return 0;
   const oldEnd = findStringEnd(oldStart, len);
   if (oldEnd < 0) return 0;
-  const nm = findNewMark(oldEnd + 1, len);
-  if (nm < 0) return 0;
-  const newStart = nm + 7;
+  const newStart = findNewMark(oldEnd + 1, len);
+  if (newStart < 0) return 0;
   const newEnd = findStringEnd(newStart, len);
   if (newEnd < 0) return 0;
   diffOneCase(oldStart, oldEnd, newStart, newEnd);
