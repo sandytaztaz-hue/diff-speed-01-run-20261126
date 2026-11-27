@@ -62,9 +62,7 @@ function writeLineContent(
   rawMode: i32,
 ): i32 {
   if (rawMode == 1) {
-    for (let i = 0; i < spanLen; i++) {
-      store<u8>(outPtr + pos + i, load<u8>(srcPtr + spanStart + i));
-    }
+    memory.copy(outPtr + pos, srcPtr + spanStart, spanLen);
     return pos + spanLen;
   }
   let p: i32 = srcPtr + spanStart;
@@ -243,19 +241,25 @@ export function renderCase(
   }
   pos = writeU32(outPtr, pos, inse, tmpPtr);
   pos = writeEscapedNewline(outPtr, pos);
+  // Single cursor pass: (ck, oi, oj) advance monotonically across hunks.
+  // (The old code rescanned all ops from 0 for every hunk: O(hunks*ops).)
+  let ck: i32 = 0;
+  let oi: i32 = 0;
+  let oj: i32 = 0;
   for (let h = 0; h < nHunks; h++) {
     const ra: i32 = load<i32>(hunksPtr + h * 8);
     const rb: i32 = load<i32>(hunksPtr + h * 8 + 4);
     const hs: i32 = ra - 3 < 0 ? 0 : ra - 3;
     const he: i32 = rb + 3 > totalOps ? totalOps : rb + 3;
-    // Old/new lines before the hunk.
-    let oBefore: i32 = 0;
-    let nBefore: i32 = 0;
-    for (let k = 0; k < hs; k++) {
-      const o: i32 = opAt(opsPtr, opsLen, pre, k);
-      if (o != 2) oBefore++;
-      if (o != 1) nBefore++;
+    // Old/new lines before the hunk (advance cursors from the last hunk).
+    while (ck < hs) {
+      const o: i32 = opAt(opsPtr, opsLen, pre, ck);
+      if (o != 2) oi++;
+      if (o != 1) oj++;
+      ck++;
     }
+    const oBefore: i32 = oi;
+    const nBefore: i32 = oj;
     let ol: i32 = 0;
     let nl: i32 = 0;
     for (let k = hs; k < he; k++) {
@@ -273,9 +277,7 @@ export function renderCase(
     pos = writeByte(outPtr, pos, 0x20);
     pos = writeU32(outPtr, pos, nl, tmpPtr);
     pos = writeEscapedNewline(outPtr, pos);
-    // Walk the hunk's ops with cursors.
-    let oi: i32 = oBefore;
-    let oj: i32 = nBefore;
+    // Walk the hunk's ops with the running cursors (oi/oj already at hs).
     let k: i32 = hs;
     while (k < he) {
       const o: i32 = opAt(opsPtr, opsLen, pre, k);
@@ -331,6 +333,7 @@ export function renderCase(
         k = j;
       }
     }
+    ck = he;
   }
   pos = writeByte(outPtr, pos, 0x22); // closing quote
   return pos;
